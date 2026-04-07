@@ -13,7 +13,7 @@ use super::shared_context::BuiltSchema;
 const TYPES: [&str; 6] = ["null", "boolean", "number", "string", "array", "object"];
 
 // Keywords that are implemented in this module
-pub(crate) const IMPLEMENTED: [&str; 27] = [
+pub(crate) const IMPLEMENTED: [&str; 28] = [
     // Core
     "anyOf",
     "oneOf",
@@ -38,6 +38,7 @@ pub(crate) const IMPLEMENTED: [&str; 27] = [
     // String
     "minLength",
     "maxLength",
+    "maxTokens",
     "pattern",
     "format",
     // Number
@@ -139,6 +140,9 @@ impl NumberSchema {
 pub struct StringSchema {
     pub min_length: usize,
     pub max_length: Option<usize>,
+    /// Maximum number of LLM tokens that the string lexeme is allowed to consume.
+    /// Enforced at parse time via the per-lexeme `max_tokens` mechanism.
+    pub max_tokens: Option<usize>,
     pub regex: Option<RegexAst>,
 }
 
@@ -336,6 +340,7 @@ impl Schema {
             (Schema::String(s1), Schema::String(s2)) => Schema::String(StringSchema {
                 min_length: s1.min_length.max(s2.min_length),
                 max_length: opt_min(s1.max_length, s2.max_length),
+                max_tokens: opt_min(s1.max_tokens, s2.max_tokens),
                 regex: match (s1.regex, s2.regex) {
                     (None, None) => None,
                     (None, Some(r)) | (Some(r), None) => Some(r),
@@ -805,6 +810,7 @@ fn compile_const(instance: &Value) -> Result<Schema> {
         Value::String(s) => Ok(Schema::String(StringSchema {
             min_length: 0,
             max_length: None,
+            max_tokens: None,
             regex: Some(RegexAst::Literal(s.to_string())),
         })),
         Value::Array(items) => {
@@ -940,6 +946,7 @@ fn compile_string(ctx: &Context, schema: &HashMap<&str, &Value>) -> Result<Schem
 
     let min_length = get_usize(schema, "minLength")?.unwrap_or(0);
     let max_length = get_usize(schema, "maxLength")?;
+    let max_tokens = get_usize(schema, "maxTokens")?;
 
     let pattern_rx = match pattern {
         None => None,
@@ -981,6 +988,7 @@ fn compile_string(ctx: &Context, schema: &HashMap<&str, &Value>) -> Result<Schem
     Ok(Schema::String(StringSchema {
         min_length,
         max_length,
+        max_tokens,
         regex,
     }))
 }
@@ -1221,6 +1229,7 @@ mod test_retriever {
             Schema::String(StringSchema {
                 min_length: 0,
                 max_length: None,
+                max_tokens: None,
                 regex: None,
             }) => {}
             _ => panic!("Unexpected schema: {val:?}"),

@@ -544,3 +544,63 @@ fn string_length_unsatisfiable() {
         "Unsatisfiable schema: minLength (2) is greater than maxLength (1)",
     );
 }
+
+// `maxTokens` caps a string lexeme at N LLM tokens. The exact token boundary
+// depends on the test tokenizer (Phi-3.5-mini-instruct), so the assertions
+// below pick values that are well above or well below any plausible boundary.
+
+#[test]
+fn string_max_tokens_high_limit_accepts() {
+    // A generous limit must not interfere with otherwise-valid strings.
+    let schema = &json!({"type": "string", "maxTokens": 1000});
+    json_schema_check(schema, &json!("hello world"), true);
+}
+
+#[test]
+fn string_max_tokens_long_string_rejected() {
+    // A string this long (with quotes and JSON escaping) will easily exceed 2 tokens.
+    let schema = &json!({"type": "string", "maxTokens": 2});
+    json_schema_check(
+        schema,
+        &json!("the quick brown fox jumps over the lazy dog and keeps running for miles"),
+        false,
+    );
+}
+
+#[test]
+fn string_max_tokens_in_object_property_accepts() {
+    let schema = &json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "maxTokens": 1000}
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    });
+    json_schema_check(schema, &json!({"name": "Alice"}), true);
+}
+
+#[test]
+fn string_max_tokens_in_object_property_rejects() {
+    let schema = &json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "maxTokens": 2}
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    });
+    json_schema_check(
+        schema,
+        &json!({"name": "this is a very long name that should not fit in two tokens"}),
+        false,
+    );
+}
+
+#[test]
+fn string_max_tokens_combined_with_max_length() {
+    // Both constraints apply; whichever is reached first wins.
+    let schema = &json!({"type": "string", "maxLength": 5, "maxTokens": 1000});
+    json_schema_check(schema, &json!("hello"), true);
+    json_schema_check(schema, &json!("toolong"), false);
+}

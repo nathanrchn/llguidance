@@ -1,4 +1,4 @@
-use crate::api::LLGuidanceOptions;
+use crate::api::{LLGuidanceOptions, NodeProps};
 use crate::grammar_builder::GrammarResult;
 use crate::json::schema::{NumberSchema, StringSchema};
 use crate::{regex_to_lark, HashMap};
@@ -196,13 +196,18 @@ impl Compiler {
                 message: reason.to_string(),
             })),
 
+            // Strings only end up here when they carry a per-lexeme constraint
+            // (currently `max_tokens`) that cannot be expressed as a plain regex
+            // and must therefore be attached to a dedicated lexeme node.
+            Schema::String(opts) => self.gen_json_string_node(opts.clone()),
+
             Schema::Array(arr) => self.gen_json_array(arr),
             Schema::Object(obj) => self.gen_json_object(obj),
             Schema::AnyOf(options) => self.process_any_of(options),
             Schema::OneOf(options) => self.process_one_of(options),
             Schema::Ref(uri) => self.get_definition(uri),
 
-            Schema::Null | Schema::Boolean(_) | Schema::String(_) | Schema::Number(_) => {
+            Schema::Null | Schema::Boolean(_) | Schema::Number(_) => {
                 unreachable!("should be handled in regex_compile()")
             }
         }
@@ -722,7 +727,15 @@ impl Compiler {
                 self.json_number(num)?
             }),
 
-            Schema::String(opts) => return self.gen_json_string(opts.clone()).map(Some),
+            Schema::String(opts) => {
+                // `max_tokens` is enforced on a dedicated lexeme node via NodeProps,
+                // so it cannot be inlined into a fused regex. Defer compilation to
+                // `gen_json_string_node` in that case.
+                if opts.max_tokens.is_some() {
+                    return Ok(None);
+                }
+                return self.gen_json_string(opts.clone()).map(Some);
+            }
 
             Schema::Any
             | Schema::Unsatisfiable(_)
@@ -733,6 +746,20 @@ impl Compiler {
             | Schema::Ref(_) => None,
         };
         Ok(r)
+    }
+
+    fn gen_json_string_node(&mut self, opts: StringSchema) -> Result<NodeRef> {
+        let max_tokens = opts.max_tokens;
+        let ast = self.gen_json_string(opts)?;
+        let rx = self.builder.regex.add_ast(ast)?;
+        Ok(self.builder.lexeme_ext(
+            rx,
+            None,
+            NodeProps {
+                max_tokens,
+                ..NodeProps::default()
+            },
+        ))
     }
 
     fn gen_json_string(&self, opts: StringSchema) -> Result<RegexAst> {
