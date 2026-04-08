@@ -331,6 +331,128 @@ fn bench_lazy_lexeme_complex(c: &mut Criterion) {
     group.finish();
 }
 
+// ── String length-bound comparison ──────────────────────────────────────────
+//
+// Compares the three ways to bound the size of a JSON string field:
+//
+//   - "unbounded":   {"type":"string"}                       — no cap
+//   - "maxLength":   {"type":"string","maxLength":N}         — char cap, baked
+//                                                               into the regex
+//   - "maxTokens":   {"type":"string","maxTokens":N}         — token cap, runs
+//                                                               via the no-skip
+//                                                               sub-grammar
+//
+// We expect:
+//   * compile/first-mask:  maxTokens slightly slower (extra sub-grammar build)
+//   * per-token mask:      maxTokens close to maxLength (the body lexeme is
+//                          a single greedy lexeme just like maxLength's)
+//   * generation loop:     maxTokens close to maxLength
+//
+// The numbers under each name are in elements/sec (mask compute) or per-iter
+// (compile). Run with:
+//   cargo bench -p llguidance --bench compute_mask -- string_bound
+
+const STRING_BOUND_SCHEMAS: &[(&str, &str)] = &[
+    (
+        "unbounded",
+        r#"{"type":"object","properties":{"s":{"type":"string"}},"required":["s"],"additionalProperties":false}"#,
+    ),
+    (
+        "maxLength_64",
+        r#"{"type":"object","properties":{"s":{"type":"string","maxLength":64}},"required":["s"],"additionalProperties":false}"#,
+    ),
+    (
+        "maxTokens_64",
+        r#"{"type":"object","properties":{"s":{"type":"string","maxTokens":64}},"required":["s"],"additionalProperties":false}"#,
+    ),
+];
+
+const STRING_BOUND_PREFIX_IN_BODY: &[u8] = b"{\"s\":\"hello world";
+
+fn string_bound_grammar(json_str: &str) -> TopLevelGrammar {
+    let schema: serde_json::Value = serde_json::from_str(json_str).unwrap();
+    TopLevelGrammar::from_json_schema(schema)
+}
+
+/// First-mask cost (parser construction + grammar compile + first compute_mask).
+/// Measures whether the maxTokens sub-grammar adds noticeable cold-start
+/// overhead compared to maxLength or unbounded.
+fn bench_string_bound_first_mask(c: &mut Criterion) {
+    let mut group = c.benchmark_group("string_bound_first_mask");
+    let vocab_size = DEFAULT_VOCAB_SIZE;
+    let tok_env = synthetic_tok_env(vocab_size);
+
+    group.throughput(Throughput::Elements(1));
+    for (name, schema) in STRING_BOUND_SCHEMAS {
+        group.bench_with_input(BenchmarkId::from_parameter(name), schema, |b, schema| {
+            b.iter(|| {
+                let mut factory = ParserFactory::new_simple(&tok_env).unwrap();
+                factory.quiet();
+                let grammar = string_bound_grammar(schema);
+                let mut matcher = Matcher::new(factory.create_parser(grammar));
+                black_box(matcher.compute_mask().unwrap())
+            })
+        });
+    }
+    group.finish();
+}
+
+/// Per-mask cost while the parser is sitting mid-string (after the opening
+/// `"` and a few content bytes). This is the inner-loop cost during
+/// generation: it should be roughly the same across the three variants.
+fn bench_string_bound_mask_in_body(c: &mut Criterion) {
+    let mut group = c.benchmark_group("string_bound_mask_in_body");
+    let vocab_size = DEFAULT_VOCAB_SIZE;
+    let tok_env = synthetic_tok_env(vocab_size);
+
+    group.throughput(Throughput::Elements(vocab_size as u64));
+    for (name, schema) in STRING_BOUND_SCHEMAS {
+        group.bench_with_input(BenchmarkId::from_parameter(name), schema, |b, schema| {
+            let mut matcher = create_matcher(
+                &tok_env,
+                string_bound_grammar(schema),
+                STRING_BOUND_PREFIX_IN_BODY,
+            );
+            b.iter(|| {
+                matcher.invalidate_bias_cache();
+                black_box(matcher.compute_mask().unwrap())
+            })
+        });
+    }
+    group.finish();
+}
+
+/// End-to-end generation: walk N bytes of body content + close the string.
+/// Captures the realistic per-iteration cost of using each bound during
+/// generation, including the cost of the cap firing at the boundary.
+fn bench_string_bound_generation(c: &mut Criterion) {
+    use criterion::BatchSize;
+
+    let mut group = c.benchmark_group("string_bound_generation");
+    let vocab_size = DEFAULT_VOCAB_SIZE;
+    let tok_env = synthetic_tok_env(vocab_size);
+
+    // Drive the parser through ~30 body characters and a closing quote +
+    // object close. Stays well below the 64-cap so the bound never trips —
+    // we want to measure steady-state cost, not boundary handling.
+    const INPUT: &[u8] = b"{\"s\":\"abcdefghijklmnopqrstuvwxyz0123\"}";
+    group.throughput(Throughput::Elements(INPUT.len() as u64));
+
+    for (name, schema) in STRING_BOUND_SCHEMAS {
+        group.bench_with_input(BenchmarkId::from_parameter(name), schema, |b, schema| {
+            b.iter_batched(
+                || create_matcher(&tok_env, string_bound_grammar(schema), b""),
+                |mut m| {
+                    run_matcher_on_input(&mut m, INPUT);
+                    black_box(m)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -338,6 +460,6 @@ criterion_group! {
         .warm_up_time(std::time::Duration::from_secs(2))
         .measurement_time(std::time::Duration::from_secs(5))
         .noise_threshold(0.05);
-    targets = bench_compute_mask, bench_compute_mask_positions, bench_token_generation, bench_first_mask, bench_lazy_lexeme, bench_lazy_lexeme_complex
+    targets = bench_compute_mask, bench_compute_mask_positions, bench_token_generation, bench_first_mask, bench_lazy_lexeme, bench_lazy_lexeme_complex, bench_string_bound_first_mask, bench_string_bound_mask_in_body, bench_string_bound_generation
 }
 criterion_main!(benches);
