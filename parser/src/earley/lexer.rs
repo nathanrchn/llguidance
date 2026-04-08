@@ -158,6 +158,19 @@ impl Lexer {
         &self.state_info(state).possible
     }
 
+    /// True if the given lexer state is in a *greedy-accepting* state for
+    /// the specific lexeme `idx` — i.e., the regex underlying that lexeme
+    /// would emit a complete token if we forced it to end here.
+    ///
+    /// Used by `apply_token`'s max_tokens enforcement to *defer* the cap
+    /// when the regex is in the middle of a multi-byte construct (e.g.,
+    /// a JSON `\u00XX` escape sequence) — terminating mid-construct would
+    /// produce malformed output, so we let the lexer consume up to the
+    /// next accepting boundary before applying the cap.
+    pub fn is_accepting_for_lexeme(&self, state: StateID, idx: LexemeIdx) -> bool {
+        self.state_info(state).greedy_accepting.contains(idx)
+    }
+
     pub fn force_lexeme_end(&self, prev: StateID) -> LexerResult {
         let info = self.state_info(prev);
         match info.possible.first() {

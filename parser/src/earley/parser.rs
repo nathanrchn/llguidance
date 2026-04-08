@@ -1390,9 +1390,29 @@ impl ParserState {
                         info_tokens,
                         class_ok
                     );
-                    if info_tokens < max_tokens && class_ok {
+                    if !class_ok {
+                        // Grammar-stack horizon hit (handled separately by
+                        // process_max_tokens) — always remove.
+                        num_limit += 1;
+                    } else if info_tokens < max_tokens {
+                        // Under the cap — keep allowed.
+                        limit.add(lex);
+                    } else if !self.lexer().is_accepting_for_lexeme(lex_state, lex) {
+                        // Cap reached, BUT the lexer regex is in the middle
+                        // of a multi-byte construct (e.g., a JSON `\u00XX`
+                        // escape, or a `\` waiting for an escape character)
+                        // and cannot terminate cleanly. Defer enforcement:
+                        // let the lexeme keep consuming until it next
+                        // reaches an accepting state. The cap may exceed by
+                        // a few bytes (== a fraction of a token), but the
+                        // resulting output is always well-formed. Without
+                        // this defer, force_lexeme_end would emit a phantom
+                        // partial lexeme and corrupt the byte stream.
+                        debug!("  max_tokens reached but state not accepting; deferring");
                         limit.add(lex);
                     } else {
+                        // Cap reached and the lexer is at an accepting
+                        // boundary — enforce cleanly.
                         num_limit += 1;
                     }
                 }
