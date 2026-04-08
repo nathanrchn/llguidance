@@ -266,3 +266,108 @@ fn maxtokens_string_with_escapes_produces_valid_json() {
     // Sanity: cap was actually applied.
     assert!(analysis.len() < target.len());
 }
+
+/// Stress test: feed a backslash-heavy target through a maxTokens-bounded
+/// JSON string. The model wants to write `$F_\sigma$` style LaTeX, but each
+/// `\` must be escaped as `\\` in JSON, so the body sees runs of `\\\\`.
+/// This was the failure pattern observed in the wild — the body was getting
+/// huge runs of escaped backslashes and then truncating mid-pair, leaving
+/// dangling backslashes.
+#[test]
+fn maxtokens_string_with_backslash_run_caps_cleanly() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "analysis": {"type": "string", "maxTokens": 8},
+            "score": {"type": "integer"}
+        },
+        "required": ["analysis", "score"],
+        "additionalProperties": false
+    });
+    let lark = format!("start: %json {}", serde_json::to_string(&schema).unwrap());
+    let grm = TopLevelGrammar::from_lark(lark);
+    let mut parser = get_parser_factory()
+        .create_parser_from_init(GrammarInit::Serialized(grm), 0, 0)
+        .unwrap();
+    parser.start_without_prompt();
+
+    // The model is trying to write LaTeX with lots of escaped backslashes.
+    // The JSON-encoded form has even more backslashes (each `\` doubles).
+    let target = r#"{"analysis": "F_\\sigma is a countable union of closed sets and \\\\\\\\\\\\\\\\\\\\\\\\\\\\ matters here too past the cap", "score": 7}"#;
+    let tok_env = get_tok_env();
+    let target_tokens = tok_env.tokenize(target);
+
+    let mut produced: Vec<u8> = Vec::new();
+    let mut t_idx = 0;
+    let mut steps = 0;
+    loop {
+        if parser.is_accepting() {
+            break;
+        }
+        steps += 1;
+        assert!(
+            steps < 300,
+            "parser failed to reach accept state in 300 steps; produced so far:\n{}",
+            String::from_utf8_lossy(&produced)
+        );
+
+        let mask = parser.compute_mask().unwrap();
+        let chosen = if t_idx < target_tokens.len() && mask.is_allowed(target_tokens[t_idx]) {
+            let t = target_tokens[t_idx];
+            t_idx += 1;
+            t
+        } else {
+            let trie = tok_env.tok_trie();
+            let is_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r');
+            let mut best: Option<u32> = None;
+            let mut best_len = usize::MAX;
+            for t in 0..mask.len() as u32 {
+                if !mask.is_allowed(t) || t == trie.eos_token() {
+                    continue;
+                }
+                let bytes = trie.token(t);
+                if bytes.is_empty() || bytes.iter().all(|b| is_ws(*b)) {
+                    continue;
+                }
+                if bytes.len() < best_len {
+                    best = Some(t);
+                    best_len = bytes.len();
+                }
+            }
+            let chosen = best.unwrap_or_else(|| {
+                panic!(
+                    "no non-whitespace token at step {steps}; produced so far:\n{}",
+                    String::from_utf8_lossy(&produced)
+                )
+            });
+            if t_idx < target_tokens.len() {
+                t_idx += 1;
+            }
+            chosen
+        };
+
+        let tok_bytes = tok_env.tok_trie().token(chosen).to_vec();
+        produced.extend_from_slice(&tok_bytes);
+        let bt = parser.consume_token(chosen).unwrap();
+        assert_eq!(bt, 0);
+    }
+
+    let produced_str = String::from_utf8_lossy(&produced).into_owned();
+    println!("\n=== produced ({} bytes) ===\n{}\n", produced.len(), produced_str);
+
+    // Must parse as valid JSON.
+    let parsed: serde_json::Value = serde_json::from_str(&produced_str).unwrap_or_else(|e| {
+        panic!("produced bytes are not valid JSON: {e}\nbytes:\n{produced_str}")
+    });
+    let obj = parsed.as_object().expect("expected JSON object");
+    let analysis = obj["analysis"].as_str().expect("analysis must be a string");
+
+    // No dangling backslash at the end.
+    assert!(
+        !analysis.ends_with('\\'),
+        "analysis ends with a dangling backslash: {analysis:?}"
+    );
+
+    // Cap was applied.
+    assert!(analysis.len() < target.len());
+}
