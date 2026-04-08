@@ -49,10 +49,13 @@ String features:
 
 - `minLength`
 - `maxLength`
-- `maxTokens` - non-standard llguidance extension; caps the string lexeme at the
-  given number of LLM tokens (counted by the active tokenizer, including the
-  surrounding JSON quotes). Enforced at parse time via the per-lexeme
-  `max_tokens` mechanism.
+- `maxTokens` - non-standard llguidance extension; caps the string body at
+  the given number of LLM tokens (counted by the active tokenizer). The cap
+  covers only the body content — not the surrounding `"` quotes. To enforce
+  this without leaking JSON whitespace into the string, the bounded string is
+  compiled into a dedicated sub-grammar with a `NoMatch` skip pattern that
+  contains `'"' + body[max_tokens=N] + '"'`; the parser then forces the
+  closing quote when the body lexeme hits its budget.
 - `pattern` (99%) - lookarounds not supported
 - `format` (74%), with the following formats: `date-time`, `time`, `date`, `duration`, `email`, `hostname`, `ipv4`, `ipv6`, `uuid`, `uri`
 
