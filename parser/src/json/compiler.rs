@@ -709,6 +709,28 @@ impl Compiler {
         )
     }
 
+    /// Like `json_quote`, but `raw_mode: true` so the surrounding `"..."` quotes
+    /// are NOT added by JsonQuote — only the body's escape handling is applied.
+    /// This is used for the `maxTokens` path, where we want the body lexeme to
+    /// be a separate node from the surrounding quote literals so that the body
+    /// regex is in an accepting state at every position (no closing-quote
+    /// requirement). The opening and closing `"` are emitted as adjacent
+    /// literal-string nodes by `gen_json_string_node`.
+    fn json_quote_raw(&self, ast: RegexAst) -> RegexAst {
+        let allowed_escapes = self
+            .options
+            .json_allowed_escapes
+            .clone()
+            .unwrap_or_else(|| "nrbtf\\\"u".to_string());
+        RegexAst::JsonQuote(
+            Box::new(ast),
+            JsonQuoteOptions {
+                allowed_escapes,
+                raw_mode: true,
+            },
+        )
+    }
+
     fn regex_compile(&mut self, schema: &Schema) -> Result<Option<RegexAst>> {
         fn literal_regex(rx: &str) -> Option<RegexAst> {
             Some(RegexAst::Literal(rx.to_string()))
@@ -748,18 +770,89 @@ impl Compiler {
         Ok(r)
     }
 
+    /// Build a JSON string node that carries a per-lexeme `max_tokens` cap.
+    ///
+    /// We can't bake "N tokens" into the regex the way `maxLength` bakes
+    /// `.{0,N}` into the body, so we instead split the JSON string into three
+    /// adjacent grammar nodes:
+    ///
+    ///     '"' + body_lexeme[max_tokens=N] + '"'
+    ///
+    /// The body lexeme's regex is the JSON string body *without* surrounding
+    /// quotes (via `json_quote_raw`), which means the regex is in an accepting
+    /// state at every content position (the lexer can voluntarily terminate
+    /// the body at any character that isn't part of an in-progress escape
+    /// sequence). When the parser hits the `max_tokens` cap on the body it can
+    /// gracefully end the lexeme, and the surrounding rule then forces the
+    /// closing `"` literal — preventing the "phantom lexeme exit" corruption
+    /// you'd get if `max_tokens` fired on a single `"<body>"` lexeme whose
+    /// regex requires the closing quote to reach an accepting state.
     fn gen_json_string_node(&mut self, opts: StringSchema) -> Result<NodeRef> {
         let max_tokens = opts.max_tokens;
-        let ast = self.gen_json_string(opts)?;
-        let rx = self.builder.regex.add_ast(ast)?;
-        Ok(self.builder.lexeme_ext(
-            rx,
+        // Synthesize a copy of `opts` with the per-lexeme cap stripped, so
+        // that `gen_json_string` produces only the body shape (length bounds,
+        // pattern, format) — we re-attach max_tokens to the body lexeme below.
+        let body_opts = StringSchema {
+            max_tokens: None,
+            ..opts
+        };
+        let body_ast = self.gen_json_string_body(body_opts)?;
+        let body_rx = self.builder.regex.add_ast(body_ast)?;
+        let body_node = self.builder.lexeme_ext(
+            body_rx,
             None,
             NodeProps {
                 max_tokens,
                 ..NodeProps::default()
             },
-        ))
+        );
+        let open_quote = self.builder.string("\"");
+        let close_quote = self.builder.string("\"");
+        Ok(self.builder.join(&[open_quote, body_node, close_quote]))
+    }
+
+    /// `gen_json_string` but returns the JSON-quoted *body* (no surrounding
+    /// `"..."`). Used by `gen_json_string_node` to build the inner lexeme of
+    /// a maxTokens-capped string.
+    fn gen_json_string_body(&self, opts: StringSchema) -> Result<RegexAst> {
+        let min_length = opts.min_length;
+        let max_length = opts.max_length;
+        if let Some(max_length) = max_length {
+            if min_length > max_length {
+                return Err(anyhow!(UnsatisfiableSchemaError {
+                    message: format!(
+                        "minLength ({min_length}) is greater than maxLength ({max_length})"
+                    ),
+                }));
+            }
+        }
+        let body = if let Some(mut ast) = opts.regex {
+            if let RegexAst::Literal(ref s) = ast {
+                let l = s.chars().count();
+                if l < min_length || l > max_length.unwrap_or(usize::MAX) {
+                    return Err(anyhow!(UnsatisfiableSchemaError {
+                        message: format!("Constant {s:?} doesn't match length constraints")
+                    }));
+                }
+            } else if min_length != 0 || max_length.is_some() {
+                ast = RegexAst::And(vec![
+                    ast,
+                    RegexAst::Regex(format!(
+                        "(?s:.{{{},{}}})",
+                        min_length,
+                        max_length.map_or("".to_string(), |v| v.to_string())
+                    )),
+                ]);
+            }
+            ast
+        } else {
+            RegexAst::Regex(format!(
+                "(?s:.{{{},{}}})",
+                min_length,
+                max_length.map_or("".to_string(), |v| v.to_string())
+            ))
+        };
+        Ok(self.json_quote_raw(body))
     }
 
     fn gen_json_string(&self, opts: StringSchema) -> Result<RegexAst> {
