@@ -159,6 +159,12 @@ impl Lexer {
     }
 
     /// True if the given lexer state is in a *greedy-accepting* state for
+    /// ANY lexeme — i.e., at least one regex would match at this position.
+    pub fn is_accepting(&self, state: StateID) -> bool {
+        self.state_info(state).greedy_accepting.is_some()
+    }
+
+    /// True if the given lexer state is in a *greedy-accepting* state for
     /// the specific lexeme `idx` — i.e., the regex underlying that lexeme
     /// would emit a complete token if we forced it to end here.
     ///

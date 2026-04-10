@@ -1397,17 +1397,24 @@ impl ParserState {
                     } else if info_tokens < max_tokens {
                         // Under the cap — keep allowed.
                         limit.add(lex);
-                    } else if !self.lexer().is_accepting_for_lexeme(lex_state, lex) {
+                    } else if !self.lexer().is_accepting_for_lexeme(lex_state, lex)
+                        && info_tokens < max_tokens.saturating_add(2)
+                    {
                         // Cap reached, BUT the lexer regex is in the middle
                         // of a multi-byte construct (e.g., a JSON `\u00XX`
                         // escape, or a `\` waiting for an escape character)
-                        // and cannot terminate cleanly. Defer enforcement:
-                        // let the lexeme keep consuming until it next
-                        // reaches an accepting state. The cap may exceed by
-                        // a few bytes (== a fraction of a token), but the
-                        // resulting output is always well-formed. Without
-                        // this defer, force_lexeme_end would emit a phantom
-                        // partial lexeme and corrupt the byte stream.
+                        // and cannot terminate cleanly. Defer enforcement
+                        // for up to 2 extra tokens to let the lexeme reach
+                        // an accepting state. Without the defer,
+                        // force_lexeme_end would emit a phantom partial
+                        // lexeme and corrupt the byte stream.
+                        //
+                        // The defer is bounded: if the model keeps producing
+                        // tokens that never reach an accepting state (e.g.,
+                        // every `\\` token leaves a trailing backslash),
+                        // we force-terminate after max_tokens + 2 to avoid
+                        // unlimited runaway. The output may have a dangling
+                        // byte in this edge case, but it's bounded.
                         debug!("  max_tokens reached but state not accepting; deferring");
                         limit.add(lex);
                     } else {
@@ -1425,7 +1432,24 @@ impl ParserState {
                 let new_state = self.lexer_mut().limit_state_to(lex_state, &limit);
                 if new_state.is_dead() {
                     debug!("  limited everything; forcing EOI");
-                    let (ok, bt) = self.try_push_byte_definitive(None);
+                    // When ALL removals come from lexeme max_tokens
+                    // (pop_classes is empty, i.e., no grammar-stack
+                    // horizon triggered) AND the lexer is at a
+                    // non-accepting state, skip the force to prevent
+                    // a phantom lexeme exit. Instead, set the lexer
+                    // to dead so the next mask terminates the body.
+                    // Grammar-stack horizon pops always force normally
+                    // because the lexer's greedy state doesn't reflect
+                    // acceptance for grammar-level max_tokens.
+                    let skip_force = pop_classes.is_empty()
+                        && !self.lexer().is_accepting(lex_state);
+                    let (ok, bt) = if skip_force {
+                        self.lexer_stack.last_mut().unwrap().lexer_state =
+                            self.lexer().a_dead_state();
+                        (false, 0)
+                    } else {
+                        self.try_push_byte_definitive(None)
+                    };
                     assert!(bt == 0);
                     if !ok {
                         debug!("parse reject on max_tokens");

@@ -41,33 +41,17 @@ from transformers import AutoTokenizer
 def main(tokenizer_name: str, max_tokens: int) -> None:
     print(f"=== llguidance build ===")
     print(f"  module file:    {inspect.getsourcefile(llguidance)}")
-    src_dir = "/".join((inspect.getsourcefile(llguidance) or "").split("/")[:-2])
-
-    # Verify the defer fix is present in the installed binary by reading
-    # the .so for the symbol name. Crude but works.
-    so_path = None
     try:
         from llguidance import _lib  # type: ignore
-        so_path = _lib.__file__
+        print(f"  native lib:     {_lib.__file__}")
     except Exception:
         pass
-    if so_path:
-        print(f"  native lib:     {so_path}")
-        try:
-            with open(so_path, "rb") as f:
-                blob = f.read()
-            print(
-                f"  defer fix:      "
-                f"{'is_accepting_for_lexeme' in blob.decode('latin1', 'replace')}"
-            )
-        except Exception as e:
-            print(f"  defer fix:      could not check ({e})")
     print()
 
     print(f"=== tokenizer ===")
     print(f"  name:           {tokenizer_name}")
     hf_tok = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
-    ll_tok = llguidance.LLTokenizer(llguidance.hf.from_tokenizer(hf_tok))
+    ll_tok = llguidance.hf.from_tokenizer(hf_tok)
     print(f"  vocab size:     {ll_tok.vocab_size}")
     print()
 
@@ -84,13 +68,10 @@ def main(tokenizer_name: str, max_tokens: int) -> None:
     print(json.dumps(schema, indent=2))
     print()
 
-    grammar = json.dumps(
-        {
-            "grammars": [{"json_schema": schema}],
-        }
-    )
-    interp = llguidance.LLInterpreter(ll_tok, grammar, log_level=0)
-    interp.start_without_prompt()
+    grammar = llguidance.LLMatcher.grammar_from_json_schema(schema)
+    matcher = llguidance.LLMatcher(ll_tok, grammar, log_level=0)
+    if matcher.is_error():
+        raise RuntimeError(f"matcher init error: {matcher.get_error()}")
 
     # Build a target with a long run of escaped backslashes — the failure
     # pattern from the cluster logs.
@@ -109,19 +90,17 @@ def main(tokenizer_name: str, max_tokens: int) -> None:
     t_idx = 0
     steps = 0
 
-    while not interp.is_accepting():
+    while not matcher.is_accepting():
+        if matcher.is_stopped():
+            break
         steps += 1
         if steps > 5000:
             raise RuntimeError(
                 f"parser did not accept in 5000 steps; produced {len(produced)} bytes"
             )
 
-        mask_bytes, _ = interp.compute_mask()
-        if mask_bytes is None:
-            break  # parser stopped
+        mask_bytes = matcher.compute_bitmask()
 
-        # Pick the next target token if allowed; otherwise pick the
-        # shortest non-whitespace allowed token.
         def is_allowed(tok_id: int) -> bool:
             byte_idx, bit_idx = divmod(tok_id, 8)
             return byte_idx < len(mask_bytes) and (
@@ -184,9 +163,11 @@ def main(tokenizer_name: str, max_tokens: int) -> None:
             else:
                 in_body = False
 
-        ok = interp.consume_token(chosen)
+        ok = matcher.consume_token(chosen)
         if not ok:
-            raise RuntimeError(f"consume_token failed at step {steps}")
+            raise RuntimeError(
+                f"consume_token failed at step {steps}: {matcher.get_error()}"
+            )
 
     print(f"=== result ===")
     print(f"  total steps:    {steps}")
