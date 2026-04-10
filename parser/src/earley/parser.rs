@@ -1451,11 +1451,24 @@ impl ParserState {
                     // is well-formed.
                     let need_rollback = pop_classes.is_empty()
                         && !self.lexer().is_accepting(lex_state);
-                    if need_rollback && !self.bytes.is_empty() {
-                        // Undo the last body byte.
-                        self.bytes.pop();
-                        self.byte_to_token_idx.pop();
-                        self.lexer_stack.pop();
+                    if need_rollback {
+                        // Roll back bytes until the lexer reaches an
+                        // accepting state. For `\\` mid-escape this is
+                        // 1 byte; for `\u00XX` it can be up to 5 bytes.
+                        // Limit to 6 iterations (max JSON escape length)
+                        // to avoid infinite loops.
+                        let mut rolled = 0;
+                        while rolled < 6
+                            && !self.bytes.is_empty()
+                            && !self.lexer().is_accepting(
+                                self.lexer_stack.last().unwrap().lexer_state,
+                            )
+                        {
+                            self.bytes.pop();
+                            self.byte_to_token_idx.pop();
+                            self.lexer_stack.pop();
+                            rolled += 1;
+                        }
                     }
                     let (ok, bt) = self.try_push_byte_definitive(None);
                     assert!(bt == 0);
