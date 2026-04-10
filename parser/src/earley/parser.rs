@@ -1441,15 +1441,23 @@ impl ParserState {
                     // Grammar-stack horizon pops always force normally
                     // because the lexer's greedy state doesn't reflect
                     // acceptance for grammar-level max_tokens.
-                    let skip_force = pop_classes.is_empty()
+                    // When only lexeme max_tokens triggered (no grammar-
+                    // stack horizon) and the lexer is non-accepting (e.g.,
+                    // mid-JSON-escape), roll back one byte to the last
+                    // accepting position. This removes the trailing `\`
+                    // so the body terminates at a complete escape boundary
+                    // and the closing `"` is not eaten by the dangling
+                    // backslash. The body is 1 byte shorter but the JSON
+                    // is well-formed.
+                    let need_rollback = pop_classes.is_empty()
                         && !self.lexer().is_accepting(lex_state);
-                    let (ok, bt) = if skip_force {
-                        self.lexer_stack.last_mut().unwrap().lexer_state =
-                            self.lexer().a_dead_state();
-                        (false, 0)
-                    } else {
-                        self.try_push_byte_definitive(None)
-                    };
+                    if need_rollback && !self.bytes.is_empty() {
+                        // Undo the last body byte.
+                        self.bytes.pop();
+                        self.byte_to_token_idx.pop();
+                        self.lexer_stack.pop();
+                    }
+                    let (ok, bt) = self.try_push_byte_definitive(None);
                     assert!(bt == 0);
                     if !ok {
                         debug!("parse reject on max_tokens");
