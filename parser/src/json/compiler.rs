@@ -758,11 +758,25 @@ impl Compiler {
     /// Used by the `maxTokens` sub-grammar path, where the opening and closing
     /// `"` are emitted as separate literal nodes around the body lexeme.
     fn json_quote_raw(&self, ast: RegexAst) -> RegexAst {
-        let allowed_escapes = self
+        // For the maxTokens body, disable `\uXXXX` escapes. The `\u`
+        // prefix introduces a 6-byte multi-byte escape that the model
+        // can leave incomplete when the max_tokens cap fires mid-escape.
+        // The parser can roll back its internal state to a complete
+        // escape boundary, but the already-emitted output tokens still
+        // contain the partial `\u00X` bytes, making json.loads fail.
+        // By disallowing `\u` entirely, the model can only generate
+        // single-byte escapes (`\\`, `\"`, `\n`, etc.) which are
+        // at most 2 bytes — the 1-byte rollback always suffices.
+        // Control characters that would need `\uXXXX` are rare in
+        // analysis text and can't be represented, but all printable
+        // ASCII and standard escapes still work fine.
+        let mut allowed_escapes = self
             .options
             .json_allowed_escapes
             .clone()
             .unwrap_or_else(|| "nrbtf\\\"u".to_string());
+        // Strip 'u' to disable \uXXXX.
+        allowed_escapes.retain(|c| c != 'u');
         RegexAst::JsonQuote(
             Box::new(ast),
             JsonQuoteOptions {

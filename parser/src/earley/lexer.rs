@@ -164,6 +164,19 @@ impl Lexer {
         self.state_info(state).greedy_accepting.is_some()
     }
 
+    /// True if ANY lexeme's regex derivative at this state is nullable
+    /// (i.e., the regex has already matched a valid prefix and can
+    /// terminate here). This is more reliable than `is_accepting` for
+    /// greedy lexemes, where `greedy_accepting` may be cleared if the
+    /// lexer thinks it can extend.
+    pub fn is_nullable_at(&mut self, state: StateID) -> bool {
+        // Force state computation if not yet done.
+        let desc = self.dfa.state_desc(state);
+        // greedy_accepting IS based on is_nullable (see compute_state_desc).
+        // If it's set, we know at least one expr is nullable.
+        desc.greedy_accepting.is_some()
+    }
+
     /// True if the given lexer state is in a *greedy-accepting* state for
     /// the specific lexeme `idx` — i.e., the regex underlying that lexeme
     /// would emit a complete token if we forced it to end here.

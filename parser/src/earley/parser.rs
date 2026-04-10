@@ -1455,11 +1455,10 @@ impl ParserState {
                         // Roll back bytes until the lexer reaches an
                         // accepting state. For `\\` mid-escape this is
                         // 1 byte; for `\u00XX` it can be up to 5 bytes.
-                        // Limit to 6 iterations (max JSON escape length)
-                        // to avoid infinite loops.
+                        // Limit to 10 iterations to avoid infinite loops.
                         let mut rolled = 0;
-                        while rolled < 6
-                            && !self.bytes.is_empty()
+                        while rolled < 10
+                            && self.bytes.len() > 1
                             && !self.lexer().is_accepting(
                                 self.lexer_stack.last().unwrap().lexer_state,
                             )
@@ -1469,6 +1468,13 @@ impl ParserState {
                             self.lexer_stack.pop();
                             rolled += 1;
                         }
+                        debug!(
+                            "max_tokens rollback: rolled {} bytes, accepting={}",
+                            rolled,
+                            self.lexer().is_accepting(
+                                self.lexer_stack.last().unwrap().lexer_state
+                            )
+                        );
                     }
                     let (ok, bt) = self.try_push_byte_definitive(None);
                     assert!(bt == 0);
