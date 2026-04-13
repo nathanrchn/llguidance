@@ -1397,29 +1397,12 @@ impl ParserState {
                     } else if info_tokens < max_tokens {
                         // Under the cap — keep allowed.
                         limit.add(lex);
-                    } else if !self.lexer().is_accepting_for_lexeme(lex_state, lex)
-                        && info_tokens < max_tokens.saturating_add(2)
-                    {
-                        // Cap reached, BUT the lexer regex is in the middle
-                        // of a multi-byte construct (e.g., a JSON `\u00XX`
-                        // escape, or a `\` waiting for an escape character)
-                        // and cannot terminate cleanly. Defer enforcement
-                        // for up to 2 extra tokens to let the lexeme reach
-                        // an accepting state. Without the defer,
-                        // force_lexeme_end would emit a phantom partial
-                        // lexeme and corrupt the byte stream.
-                        //
-                        // The defer is bounded: if the model keeps producing
-                        // tokens that never reach an accepting state (e.g.,
-                        // every `\\` token leaves a trailing backslash),
-                        // we force-terminate after max_tokens + 2 to avoid
-                        // unlimited runaway. The output may have a dangling
-                        // byte in this edge case, but it's bounded.
-                        debug!("  max_tokens reached but state not accepting; deferring");
-                        limit.add(lex);
                     } else {
-                        // Cap reached and the lexer is at an accepting
-                        // boundary — enforce cleanly.
+                        // Cap reached — enforce. If the lexer is mid-escape
+                        // (non-accepting), force_lexeme_end will produce a
+                        // phantom exit and the output may contain a partial
+                        // escape at the body boundary. The caller is expected
+                        // to sanitize this in post-processing.
                         num_limit += 1;
                     }
                 }
@@ -1432,50 +1415,6 @@ impl ParserState {
                 let new_state = self.lexer_mut().limit_state_to(lex_state, &limit);
                 if new_state.is_dead() {
                     debug!("  limited everything; forcing EOI");
-                    // When ALL removals come from lexeme max_tokens
-                    // (pop_classes is empty, i.e., no grammar-stack
-                    // horizon triggered) AND the lexer is at a
-                    // non-accepting state, skip the force to prevent
-                    // a phantom lexeme exit. Instead, set the lexer
-                    // to dead so the next mask terminates the body.
-                    // Grammar-stack horizon pops always force normally
-                    // because the lexer's greedy state doesn't reflect
-                    // acceptance for grammar-level max_tokens.
-                    // When only lexeme max_tokens triggered (no grammar-
-                    // stack horizon) and the lexer is non-accepting (e.g.,
-                    // mid-JSON-escape), roll back one byte to the last
-                    // accepting position. This removes the trailing `\`
-                    // so the body terminates at a complete escape boundary
-                    // and the closing `"` is not eaten by the dangling
-                    // backslash. The body is 1 byte shorter but the JSON
-                    // is well-formed.
-                    let need_rollback = pop_classes.is_empty()
-                        && !self.lexer().is_accepting(lex_state);
-                    if need_rollback {
-                        // Roll back bytes until the lexer reaches an
-                        // accepting state. For `\\` mid-escape this is
-                        // 1 byte; for `\u00XX` it can be up to 5 bytes.
-                        // Limit to 10 iterations to avoid infinite loops.
-                        let mut rolled = 0;
-                        while rolled < 10
-                            && self.bytes.len() > 1
-                            && !self.lexer().is_accepting(
-                                self.lexer_stack.last().unwrap().lexer_state,
-                            )
-                        {
-                            self.bytes.pop();
-                            self.byte_to_token_idx.pop();
-                            self.lexer_stack.pop();
-                            rolled += 1;
-                        }
-                        debug!(
-                            "max_tokens rollback: rolled {} bytes, accepting={}",
-                            rolled,
-                            self.lexer().is_accepting(
-                                self.lexer_stack.last().unwrap().lexer_state
-                            )
-                        );
-                    }
                     let (ok, bt) = self.try_push_byte_definitive(None);
                     assert!(bt == 0);
                     if !ok {

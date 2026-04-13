@@ -158,38 +158,6 @@ impl Lexer {
         &self.state_info(state).possible
     }
 
-    /// True if the given lexer state is in a *greedy-accepting* state for
-    /// ANY lexeme — i.e., at least one regex would match at this position.
-    pub fn is_accepting(&self, state: StateID) -> bool {
-        self.state_info(state).greedy_accepting.is_some()
-    }
-
-    /// True if ANY lexeme's regex derivative at this state is nullable
-    /// (i.e., the regex has already matched a valid prefix and can
-    /// terminate here). This is more reliable than `is_accepting` for
-    /// greedy lexemes, where `greedy_accepting` may be cleared if the
-    /// lexer thinks it can extend.
-    pub fn is_nullable_at(&mut self, state: StateID) -> bool {
-        // Force state computation if not yet done.
-        let desc = self.dfa.state_desc(state);
-        // greedy_accepting IS based on is_nullable (see compute_state_desc).
-        // If it's set, we know at least one expr is nullable.
-        desc.greedy_accepting.is_some()
-    }
-
-    /// True if the given lexer state is in a *greedy-accepting* state for
-    /// the specific lexeme `idx` — i.e., the regex underlying that lexeme
-    /// would emit a complete token if we forced it to end here.
-    ///
-    /// Used by `apply_token`'s max_tokens enforcement to *defer* the cap
-    /// when the regex is in the middle of a multi-byte construct (e.g.,
-    /// a JSON `\u00XX` escape sequence) — terminating mid-construct would
-    /// produce malformed output, so we let the lexer consume up to the
-    /// next accepting boundary before applying the cap.
-    pub fn is_accepting_for_lexeme(&self, state: StateID, idx: LexemeIdx) -> bool {
-        self.state_info(state).greedy_accepting.contains(idx)
-    }
-
     pub fn force_lexeme_end(&self, prev: StateID) -> LexerResult {
         let info = self.state_info(prev);
         match info.possible.first() {
